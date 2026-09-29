@@ -206,7 +206,7 @@ async function makeViewerServer({ dir, projectId }) {
   });
 }
 
-test("generate_video.js direct fire with image ref uploads asset and lands node + mp4", async (t) => {
+test("generate_video.js direct fire with image ref ships the URL and lands node + mp4", async (t) => {
   await ensureTunnelUrl(t);
   const { projectId, dir } = await setupProject(t);
   const pai = await makePaiServer();
@@ -250,31 +250,34 @@ test("generate_video.js direct fire with image ref uploads asset and lands node 
   assert.equal(reply.canvas_mutation.node_id, "video_1");
   assert.equal(reply.canvas_mutation.version, 1);
 
-  // Asset-upload leg: group → create (tunnel-rewritten canvas URL) → poll.
-  assert.deepEqual(pai.captures.assetActions.map((a) => a.action), [
-    "CreateAssetGroup",
-    "CreateAsset",
-    "GetAsset",
-  ]);
-  const createAsset = pai.captures.assetActions[1].payload;
-  assert.equal(createAsset.GroupId, "group_1");
-  assert.equal(createAsset.AssetType, "Image");
-  assert.equal(createAsset.Name, "image_1.png");
-  assert.ok(
-    createAsset.URL.endsWith(`/projects/${projectId}/assets/images/image_1.png`),
-    `CreateAsset URL should carry the canvas path, got: ${createAsset.URL}`,
+  // No asset-upload leg. 2.0 moved onto the same multi-vendor route 2.5 uses,
+  // so an id minted here would belong to one vendor and be unresolvable on
+  // whichever one the dispatch actually picks — terminally, since that reads
+  // as bad caller input and bad input does not rotate. The upload still
+  // happens; it happens downstream, after the vendor is known.
+  assert.deepEqual(
+    pai.captures.assetActions.map((a) => a.action),
+    [],
+    "2.0 must not pre-upload: the vendor is chosen downstream, so an id " +
+      "minted here is a guess",
   );
-  assert.equal(pai.captures.assetActions[2].payload.Id, "asset_1");
 
-  // Submit wire contract: text part first, then the asset:// image ref.
+  // Submit wire contract: text part first, then the reference as a fetchable
+  // URL — the same URL the pre-upload used to read FROM.
   assert.equal(pai.captures.submitBodies.length, 1);
   const submit = pai.captures.submitBodies[0];
   assert.equal(submit.model, "video-generation");
   assert.equal(submit.payload.model, "pai-pro-video-endpoint-01");
-  assert.deepEqual(submit.payload.content, [
-    { type: "text", text: prompt },
-    { type: "image_url", image_url: { url: "asset://asset_1" }, role: "reference_image" },
-  ]);
+  assert.equal(submit.payload.content.length, 2);
+  assert.deepEqual(submit.payload.content[0], { type: "text", text: prompt });
+  const imagePart = submit.payload.content[1];
+  assert.equal(imagePart.type, "image_url");
+  assert.equal(imagePart.role, "reference_image");
+  assert.match(
+    imagePart.image_url.url,
+    new RegExp(`^https?://.+/projects/${projectId}/assets/images/image_1\\.png$`),
+    `expected a fetchable canvas URL, got: ${imagePart.image_url.url}`,
+  );
   assert.equal(submit.payload.generate_audio, true);
   assert.equal(submit.payload.ratio, "16:9");
   assert.equal(submit.payload.duration, 8);

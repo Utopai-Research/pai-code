@@ -24,7 +24,6 @@ import {
   videoApiVersions,
   videoModelForApiVersion,
 } from "../model_registry.js";
-import { uploadReferences } from "../pai_assets_client.js";
 import { kickPreupload } from "./_preupload_hook.js";
 import {
   streamUrlToTmp,
@@ -205,15 +204,23 @@ if (isV25 && !VIDEO_25_RATIOS.includes(args["aspect-ratio"])) {
   process.exit(2);
 }
 
-// The provider requires an image_url or video_url item to accompany any audio_url item
-// (enforced by the provider adapter on that route). On 2.0 PAI rejects this
-// synchronously and free; on the 2.5 route it is checked AFTER the freeze and
-// AFTER every reference is uploaded upstream, so it arrives as an async FAILED
-// minutes later with a refund only via Pub/Sub or reconcile.
-if (isV25 && audSrcIds.length > 0 && refSourcesArg.length === 0) {
+// 🔴 THIS GUARD WAS POINTED AT THE WRONG VERSION, IN BOTH DIRECTIONS.
+//
+// The rule is 2.0's, not 2.5's: the upstream refuses audio with no image or
+// video beside it on the 2.0 series and ACCEPTS audio-only on 2.5. This
+// refused exactly the version that works and waved through the one that does
+// not — so an audio-only 2.5 job was blocked here for no reason, and an
+// audio-only 2.0 job went out to be refused upstream.
+//
+// That second half now costs more than it used to. 2.0 moved onto the route
+// that enforces this, where the check runs after the credits are frozen, so
+// what used to be a free refusal arrives as a failed render with a refund
+// that depends on the async settle path. Refusing locally is free and
+// immediate, and that is the whole reason this guard exists.
+if (!isV25 && audSrcIds.length > 0 && refSourcesArg.length === 0) {
   fail(
     "bad_args",
-    "--version 2.5 rejects an audio-only reference set: every --ref-audio-source-id needs at least one image or video reference (--ref-source-id) to anchor it. On the 2.5 route this is only caught after credits are frozen, so it is refused here.",
+    "--version 2.0 rejects an audio-only reference set: every --ref-audio-source-id needs at least one image or video reference (--ref-source-id) to anchor it. Pass --version 2.5, which accepts audio-only input, or add a visual reference. Upstream only catches this after credits are frozen, so it is refused here.",
   );
   process.exit(2);
 }
@@ -263,13 +270,6 @@ if (args["auto-run-id"] !== undefined) {
     );
     process.exit(2);
   }
-}
-
-// Asset preupload through PAI's video-generation-assets costs ~$0.01 per
-// ref. Count canvas source-ids once each across image + video + audio refs.
-function countUniqueRefs() {
-  const sids = new Set([...refSourcesArg, ...audSrcIds]);
-  return sids.size;
 }
 
 // BOTH versions are priced on BILLED seconds: the clip asked for plus every
@@ -377,14 +377,11 @@ if (args.stage && !routeOwnedPending) {
     );
     process.exit(1);
   }
-  // Only 2.0 pays this. 2.5 stopped pre-uploading (see the ref block below),
-  // so there are no asset calls to charge for — and this number's only job is
-  // to equal the charge. Leaving it in would quote every 2.5 reference at a
-  // cent nobody spends, and the draft gate never re-quotes, so the gap would
-  // be permanent for that job rather than corrected at fire time.
-  const refCount = isV25 ? 0 : countUniqueRefs();
-  const assetCost = refCount * (getCost("video-generation-assets") ?? 0.01);
-  const costUsd = +(Number(videoCost ?? 0) + assetCost).toFixed(3);
+  // No per-reference add-on: nothing pre-uploads any more, so there is no
+  // separate call to charge for. The model price IS the price, and this
+  // number's only job is to equal the charge — the draft gate never
+  // re-quotes, so a stale cent here would stay wrong for the life of the job.
+  const costUsd = +Number(videoCost ?? 0).toFixed(3);
   const autoRunId = args["auto-run-id"] || null;
   const autoProjectId = autoRunId
     ? args["project-id"] || (await readActiveProject().catch(() => null))
@@ -537,37 +534,37 @@ try {
   // the vendor it actually selected, so references and render cannot
   // disagree. Pre-uploading here is what took that mechanism away.
   //
-  // 2.0 keeps pre-uploading because its route does NOT upload for us — it
-  // forwards the body to one fixed vendor and expects ids to already exist.
-  // Sending it a URL would hand the vendor a reference it was never asked to
-  // fetch. The two halves move together or not at all.
+  // 2.0 now does the same. Its route moved onto that same pipeline, so it too
+  // is chosen per task and uploads what it is given — which makes minting an
+  // id here exactly as wrong for 2.0 as it already was for 2.5.
   //
-  // `tunnelUrl` is what the pre-upload was uploading FROM (see
-  // buildProviderRefs), so the URL path needs nothing new — it stops doing
-  // the step instead of doing a different one.
+  // 🔴 THE UPLOAD DID NOT GO AWAY. IT MOVED TO THE ONLY LAYER THAT CAN DO IT
+  // CORRECTLY.
+  //
+  // Every vendor still needs the bytes in its own asset system, and the
+  // pipeline still puts them there — into the vendor it selected, after it
+  // selected one. That ordering is the entire point. This client cannot
+  // know the vendor: it is decided at dispatch, downstream, per task. So a
+  // pre-upload here is a guess, and a wrong guess is an id no other vendor
+  // can resolve — terminal, because that failure reads as bad caller input
+  // and bad input does not rotate.
+  //
+  // `tunnelUrl` is what the pre-upload was reading FROM (see
+  // buildProviderRefs), so this path needs nothing new. It stops doing a
+  // step rather than doing a different one.
+  //
+  // The pre-upload helper is gone from this file, but NOT from the repo:
+  // `pai_assets_client.uploadReferences` stays exported and the endpoint it
+  // calls stays live, because older copies of this client still pre-upload
+  // and the backend still routes them to the vendor that minted their ids.
   let refs = { images: [], audios: [], videos: [] };
   const hasRefs = resolvedImages.length || resolvedAudios.length || resolvedVideos.length;
-  if (hasRefs && isV25) {
+  if (hasRefs) {
     refs = {
       images: resolvedImages.map((r) => r.tunnelUrl),
       audios: resolvedAudios.map((r) => r.tunnelUrl),
       videos: resolvedVideos.map((r) => r.tunnelUrl),
     };
-  } else if (hasRefs) {
-    try {
-      refs = await uploadReferences({
-        images: resolvedImages,
-        audios: resolvedAudios,
-        videos: resolvedVideos,
-      });
-    } catch (e) {
-      const extra = e.assetRejected
-        ? { failed_url: e.failedUrl || null, kind: e.kind || null }
-        : (e.retryAfterSec ? { retryAfterSec: e.retryAfterSec } : {});
-      fail(e.assetRejected ? "asset_rejected" : classify(e), e.message, extra);
-      exitCode = 1;
-      throw e;
-    }
   }
 
   const { taskId } = await submitVideo({
@@ -613,11 +610,6 @@ try {
           duration: durationInt,
           billed_duration_sec: billedDurationSec,
         },
-        // 0, not countUniqueRefs(): this branch is 2.5, which no longer
-        // pre-uploads, so its references cost nothing. Same reason the quote
-        // above zeroes them — and this number is the one the canvas shows,
-        // so a stale cent here contradicts the gate the user already saw.
-        0,
       )
     : null;
   const shotIdRaw = args["shot-id"];

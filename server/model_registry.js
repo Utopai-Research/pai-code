@@ -411,50 +411,31 @@ export function videoModelForApiVersion(version) {
 }
 
 /**
- * What staging a job will book, references included.
+ * Stage-time price: what the Generate button shows, and what the job spends.
  *
- * A video's price is not only the model's: every reference is pre-uploaded to
- * the provider through `video-generation-assets` at ~$0.01 each, and
- * generate_video.js adds that to the draft's `cost_usd`. A caller that quotes
- * `getCost` alone therefore shows a number lower than the one it is about to
- * spend — small in dollars, but it is the number the user is being asked to
- * approve, so it has to be the same one.
+ * 🔴 THE PER-REFERENCE ADD-ON IS GONE, AND SO IS THE SPEND IT MIRRORED.
  *
- * This lives here so the CLI and the /cost route share the arithmetic rather
- * than each carrying a copy. `refCount` is ignored for kinds that have no
- * preupload step: image references travel inside the request.
+ * This used to add a cent per reference, because every reference was
+ * pre-uploaded through a separate paid call before the render was submitted.
+ * Neither version does that any more: references travel as URLs and the
+ * upstream fetches them into whichever vendor it selected, so there is no
+ * per-reference call left to charge for.
+ *
+ * The add-on was deliberately FRICTION rather than cost recovery — a floor on
+ * attaching thirty references for free, since a cent is nowhere near what a
+ * reference actually costs upstream (that is billed by seconds, already priced
+ * through videoBilledDurationSec, and can even be negative because a video
+ * reference moves the whole job to a cheaper rate column). If the friction is
+ * wanted back it has to be reintroduced as friction, on its own reasoning —
+ * not by reviving an add-on that mirrors a call nobody makes.
+ *
+ * Kept as a function rather than folded into getCost: this is the number the
+ * user approves at the draft gate, and it deserves a name that says which
+ * number it is.
  */
-// Kinds whose references are pre-uploaded through video-generation-assets and
-// therefore carry a per-reference add-on. A set rather than the old
-// `kind !== "video"` equality: 2.5 uploads its refs through the same endpoint,
-// and a strict equality would have dropped the add-on from the PATCH re-quote
-// while generate_video.js kept adding it at stage time — the two prices for
-// one draft disagreeing by a cent per reference.
-const REF_PRICED_KINDS = new Set(["video", "video_25"]);
-
-/**
- * Stage-time price: the model price plus the per-reference add-on.
- *
- * 🔴 The add-on is FRICTION, not cost recovery, and the distinction matters
- * because the arithmetic looks wrong until you know it. A cent is nowhere near
- * what a reference costs upstream — that is billed by SECONDS at the output
- * resolution and can even be negative, since a video reference moves the whole
- * job to a cheaper rate column. Those seconds are already priced, through
- * videoBilledDurationSec.
- *
- * What the cent buys is a floor on attaching references for free. Nothing else
- * in the pipeline makes a caller think twice about sending thirty of them, and
- * each one is a real upload the provider has to accept. Do not "correct" this
- * to match vendor cost; it was never trying to.
- */
-export function stagedCostUsd(modelOrId, params = {}, refCount = 0) {
+export function stagedCostUsd(modelOrId, params = {}) {
   const m = typeof modelOrId === "string" ? getModel(modelOrId) : modelOrId;
-  const base = getCost(m, params);
-  if (base === null) return null;
-  const refs = Number.isFinite(refCount) ? Math.max(0, Math.trunc(refCount)) : 0;
-  if (refs === 0 || !REF_PRICED_KINDS.has(m?.kind)) return base;
-  const perRef = getCost("video-generation-assets") ?? 0.01;
-  return +(base + refs * perRef).toFixed(3);
+  return getCost(m, params);
 }
 
 export function getCost(modelOrId, params = {}) {

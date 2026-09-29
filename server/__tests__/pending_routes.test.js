@@ -783,12 +783,19 @@ test("5x concurrent position PATCHes serialize cleanly under the project lock", 
   assert.ok(Array.isArray(after.argv));
 });
 
-test("PATCH re-pricing keeps a video draft's reference surcharge", async () => {
-  // The per-reference cent is friction, not cost recovery — it puts a floor on
-  // attaching references for free, and nothing else in the pipeline does. So a
-  // re-quote has to carry it: re-pricing on the model alone would hand back a
-  // cheaper number than the job will spend, which is the one thing the draft
-  // gate exists to prevent.
+test("PATCH re-pricing quotes a video draft on the model alone, references free", async () => {
+  // This assertion used to run the other way, and the reason it flipped is the
+  // whole point of the invariant rather than a change of mind about it.
+  //
+  // The per-reference cent mirrored a real separate call: every reference was
+  // pre-uploaded through a paid endpoint before the render was submitted. That
+  // call is gone — references travel as URLs now and the upstream fetches them
+  // into whichever vendor it picked — so the cent mirrors nothing.
+  //
+  // The rule did not change: this number is the one on the Generate button,
+  // and it has to equal what the job spends. It was wrong to omit the cent
+  // while the upload was real, and it is wrong to add it now that the upload
+  // is not. Same invariant, opposite arithmetic.
   const { jobId } = await seedDraft({
     overrides: {
       kind: "video",
@@ -808,7 +815,8 @@ test("PATCH re-pricing keeps a video draft's reference surcharge", async () => {
   });
   assert.equal(r.status, 200);
   const after = await readSidecar(jobId);
-  // 5s x $0.11 = $0.55 for the clip (480p, no video refs), plus 2 x $0.01
-  // of preupload — the two references here are images, which add no seconds.
-  assert.equal(after.cost_usd, 0.57);
+  // 5s x $0.11 = $0.55 for the clip (480p, no video refs). The two image
+  // references add nothing: no seconds, because images carry none, and no
+  // upload, because nothing pre-uploads.
+  assert.equal(after.cost_usd, 0.55);
 });

@@ -334,14 +334,12 @@ export function registerPendingRoutes({ app, projects, broadcasters }) {
           }
           sidecar.argv = argv;
           if (costedChanged && typeof sidecar.model === "string") {
-            // References count toward the price a video draft books —
-            // generate_video.js pre-uploads each one — so re-pricing on the
-            // model alone would quote less than the job will spend. The
-            // number on the Generate button is the one being approved, so it
-            // has to be the one that will be charged.
-            const refs = Array.isArray(sidecar.reference_source_ids)
-              ? new Set(sidecar.reference_source_ids).size
-              : 0;
+            // References no longer move this number. Nothing pre-uploads
+            // them any more — they travel as URLs and the upstream fetches
+            // them itself — so there is no per-reference call to charge for,
+            // and stagedCostUsd stopped taking a count. What still matters
+            // here is that this quote equals the charge: it is the number on
+            // the Generate button, which is the one being approved.
             const next = stagedCostUsd(sidecar.model, {
               image_size: sidecar.image_size,
               resolution: sidecar.resolution,
@@ -354,7 +352,7 @@ export function registerPendingRoutes({ app, projects, broadcasters }) {
               // whitelisted entry), so no extra readers.js field is needed here.
               ref_video_seconds: sidecar.ref_video_seconds,
               text: sidecar.text,
-            }, refs);
+            });
             if (typeof next === "number" && Number.isFinite(next)) {
               // An Auto draft's reservation was taken at stage time and
               // the ledger has no re-reserve; a cost-raising edit would
