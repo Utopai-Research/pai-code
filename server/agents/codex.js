@@ -112,6 +112,34 @@ async function readSessionMeta(filePath) {
   return null;
 }
 
+/**
+ * True when a rollout belongs to a sub-agent rather than to the thread the
+ * user is actually sitting in.
+ *
+ * 🔴 SKIPPING THESE IS LOAD-BEARING, AND THE FAILURE IS PERMANENT.
+ *
+ * Codex spawns sub-agents into the SAME sessions directory, with the same
+ * `cwd` and the same `originator` as their parent — so neither of the filters
+ * around this one can tell them apart. And a sub-agent is always spawned
+ * after its parent, which means it always wins "newest file wins".
+ *
+ * Resuming one is not merely wrong, it is impossible: codex refuses with
+ * "cannot resume an unloaded multi-agent v2 sub-agent through its parent".
+ * Since the id is then persisted to `meta.agent_session_id` and retried on
+ * every refresh, one sub-agent turns a project's terminal into a permanent
+ * resume error with no way out from the UI.
+ *
+ * Two markers, because they arrived together and either alone is enough:
+ * `thread_source` is the explicit label, and `source.subagent` is the spawn
+ * record. An ABSENT `thread_source` is treated as a normal thread — rollouts
+ * written before sub-agents existed have no such field, and rejecting those
+ * would make every old session unresumable.
+ */
+function isSubagentSession(payload) {
+  if (payload?.thread_source === "subagent") return true;
+  return !!payload?.source?.subagent;
+}
+
 async function readSortedDirs(dir) {
   const entries = await fsp.readdir(dir, { withFileTypes: true });
   return entries
@@ -174,6 +202,7 @@ export async function findLatestCodexSession(
       const payload = await readSessionMeta(filePath);
       if (!payload) continue;
       if (payload.originator !== CODEX_SESSION_ORIGINATOR) continue;
+      if (isSubagentSession(payload)) continue;
       const sessionCwd = await normalizePathForCompare(payload.cwd);
       if (sessionCwd !== projectCwd) continue;
       const sessionId = safeSessionId(payload.id);
