@@ -1,4 +1,5 @@
 // Full-path spawn tests for cli/generate_video.js (PAI async video tier).
+// Modification notice: add draft, replay, and submit tests for typed video refs.
 //
 // Cloned from generate_image_pro_cli.test.js: fake PAI server (PAI_API_BASE),
 // fake viewer HTTP server for /mutate + /preupload-asset, runCli spawn
@@ -24,7 +25,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import http from "node:http";
@@ -97,6 +98,111 @@ async function setupProject(t) {
   );
   t.after(() => rm(dir, { recursive: true, force: true }));
   return { projectId, dir };
+}
+
+// Test typed references; ffprobe is deterministic for the
+// synthetic input bytes because these tests exercise wiring, not decoding.
+async function addVideoRef(dir) {
+  const workflowPath = join(dir, "workflow.json");
+  const workflow = JSON.parse(await readFile(workflowPath, "utf8"));
+  await writeFile(join(dir, "assets", "videos", "video_1.mp4"), MP4_BYTES);
+  workflow.nodes.push({
+    id: "video_1", type: "video_result",
+    data: {
+      label: "camera motion", local_path: "assets/videos/video_1.mp4",
+      duration: 2, aspect: "16:9", shot_id: null, metadata: { source: "test" },
+    },
+  });
+  await writeFile(workflowPath, JSON.stringify(workflow));
+  const bin = join(dir, "test-bin");
+  await mkdir(bin);
+  const probe = join(bin, "ffprobe");
+  await writeFile(probe, '#!/bin/sh\nprintf \'%s\\n\' \'{"streams":[{"codec_type":"video","duration":"2"}]}\'\n');
+  await chmod(probe, 0o755);
+  return { PATH: `${bin}:${process.env.PATH}` };
+}
+
+for (const version of ["2.0", "2.5"]) {
+  test(`generate_video.js ${version} rejects cross-kind prompt refs before draft or submit`, async (t) => {
+    await ensureTunnelUrl(t);
+    const { projectId, dir } = await setupProject(t);
+    const probeEnv = await addVideoRef(dir);
+    const pai = await makePaiServer({ submitStatus: 422 });
+    t.after(() => new Promise((resolve) => pai.server.close(resolve)));
+    const cases = [
+      ["the character in @Image2", ["image_1", "video_1"], "@Image2"],
+      ["the camera in @Video2", ["image_1", "video_1"], "@Video2"],
+      ["continue @Video1", ["image_1"], "@Video1"],
+      ["the character in @Image1", ["video_1"], "@Image1"],
+    ];
+    for (const [prompt, refs, mention] of cases) {
+      for (const mode of [[], ["--stage", "--draft-only"]]) {
+        const result = await runCli({
+          script: "generate_video.js", cwd: dir,
+          args: ["--version", version, "--duration", "5", "--project-id", projectId,
+            "--prompt", prompt, ...refs.flatMap((id) => ["--ref-source-id", id]), ...mode],
+          env: { ...probeEnv, PAI_KEY: "PAI_test", PAI_API_BASE: pai.url },
+        });
+        assert.equal(result.code, 2, result.stdout + result.stderr);
+        const reply = parseReply(result.stdout);
+        assert.equal(reply.klass, "bad_args");
+        assert.ok(reply.message.includes(mention), reply.message);
+        assert.equal(reply.sent.version, version);
+      }
+    }
+    assert.equal(pai.captures.submitBodies.length, 0);
+    assert.equal(pai.captures.assetActions.length, 0);
+    const drafts = await readdir(join(dir, ".pending")).catch(() => []);
+    assert.deepEqual(drafts, []);
+  });
+
+  test(`generate_video.js ${version} rechecks reference kinds when a reviewed draft fires`, async (t) => {
+    const { projectId, dir } = await setupProject(t);
+    const probeEnv = await addVideoRef(dir);
+    const pai = await makePaiServer({ submitStatus: 422 });
+    t.after(() => new Promise((resolve) => pai.server.close(resolve)));
+    const args = ["--version", version, "--duration", "5", "--project-id", projectId,
+      "--prompt", "the character in @Image1 follows @Video1",
+      "--ref-source-id", "video_1", "--ref-source-id", "image_1"];
+    const env = { ...probeEnv, PAI_KEY: "PAI_test", PAI_API_BASE: pai.url };
+    const staged = await runCli({ script: "generate_video.js", args: [...args, "--stage", "--draft-only"], cwd: dir, env });
+    assert.equal(staged.code, 0, staged.stdout + staged.stderr);
+    const jobId = parseReply(staged.stdout).job_id;
+    const workflowPath = join(dir, "workflow.json");
+    const workflow = JSON.parse(await readFile(workflowPath, "utf8"));
+    workflow.nodes = workflow.nodes.filter((node) => node.id !== "video_1");
+    await writeFile(workflowPath, JSON.stringify(workflow));
+    const fired = await runCli({ script: "generate_video.js", args: [...args, "--existing-job-id", jobId], cwd: dir, env });
+    assert.equal(fired.code, 2, fired.stdout + fired.stderr);
+    const reply = parseReply(fired.stdout);
+    assert.equal(reply.klass, "bad_args");
+    assert.match(reply.message, /@Video1.*only 0 video ref/);
+    assert.equal(pai.captures.submitBodies.length, 0);
+  });
+
+  test(`generate_video.js ${version} preserves mixed reference URLs and per-kind order`, async (t) => {
+    await ensureTunnelUrl(t);
+    const { projectId, dir } = await setupProject(t);
+    const probeEnv = await addVideoRef(dir);
+    const pai = await makePaiServer();
+    t.after(() => new Promise((resolve) => pai.server.close(resolve)));
+    const result = await runCli({
+      script: "generate_video.js", cwd: dir,
+      args: ["--version", version, "--duration", "5", "--project-id", projectId,
+        "--prompt", "@Image1 follows @Video1; @Image1 turns toward @Video1",
+        "--ref-source-id", "video_1", "--ref-source-id", "image_1", "--no-canvas-write"],
+      env: { ...probeEnv, PAI_KEY: "PAI_test", PAI_API_BASE: pai.url },
+    });
+    assert.equal(result.code, 0, result.stdout + result.stderr);
+    const reply = parseReply(result.stdout);
+    assert.equal(reply.ok, true);
+    assert.equal(pai.captures.submitBodies.length, 1);
+    const content = pai.captures.submitBodies[0].payload.content;
+    assert.deepEqual(content.slice(1).map((item) => item.role), ["reference_image", "reference_video"]);
+    assert.ok(content[1].image_url.url.endsWith("/assets/images/image_1.png"));
+    assert.ok(content[2].video_url.url.endsWith("/assets/videos/video_1.mp4"));
+    assert.equal(pai.captures.assetActions.length, 0);
+  });
 }
 
 // Serves the full async-video surface: video-generation-assets actions on

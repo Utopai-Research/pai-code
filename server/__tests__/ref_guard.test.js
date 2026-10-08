@@ -1,4 +1,5 @@
 // Tests for the @ImageN/@VideoN/@AudioN mentioned-but-not-wired guard.
+// Modification notice: add regression coverage for resolved video ref kinds.
 // Unit-tests the pure logic in cli/_ref_guard.js (incl. the repeated-mention
 // and false-positive prose cases), plus a couple of integration spawn tests
 // proving the CLI rejects (bad_args, exit 2) before any paid call.
@@ -101,6 +102,43 @@ test("video tier: reverse direction (refs passed, none mentioned) passes", () =>
     checkPromptRefsWired({ prompt: "a quiet courtyard at dawn, slow push-in", refSourceCount: 2, audioRefCount: 1, tier: "video" }),
     null,
   );
+});
+
+// Named video refs use resolved media-type counts.
+test("video tier: a video cannot satisfy a missing image ordinal", () => {
+  assert.match(checkPromptRefsWired({
+    prompt: "use the character in @Image2", refSourceCount: 2,
+    imageRefCount: 1, videoRefCount: 1, tier: "video",
+  }), /@Image2.*only 1 image ref/);
+});
+
+test("video tier: an image cannot satisfy a missing video ordinal", () => {
+  assert.match(checkPromptRefsWired({
+    prompt: "follow the camera in @Video2", refSourceCount: 2,
+    imageRefCount: 1, videoRefCount: 1, tier: "video",
+  }), /@Video2.*only 1 video ref/);
+});
+
+test("video tier: exact counts preserve mixed, repeated, and unmentioned refs", () => {
+  for (const prompt of [
+    "@Image1 follows @Video1; @Image1 turns toward @Video1",
+    "a quiet courtyard at dawn", "the sign reads @Image2K and @Video1Studios",
+  ]) {
+    assert.equal(checkPromptRefsWired({
+      prompt, refSourceCount: 2, imageRefCount: 1, videoRefCount: 1, tier: "video",
+    }), null);
+  }
+});
+
+test("video tier: exact visual counts preserve independent audio refs", () => {
+  assert.equal(checkPromptRefsWired({
+    prompt: "voice @Audio1", refSourceCount: 0, imageRefCount: 0,
+    videoRefCount: 0, audioRefCount: 1, tier: "video",
+  }), null);
+  assert.match(checkPromptRefsWired({
+    prompt: "voice @Audio2", refSourceCount: 0, imageRefCount: 0,
+    videoRefCount: 0, audioRefCount: 1, tier: "video",
+  }), /@Audio2/);
 });
 
 test("video tier: the A1 bug (@Image1/@Image2/@Audio1, 0 refs) rejects", () => {

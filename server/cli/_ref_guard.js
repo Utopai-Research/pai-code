@@ -1,4 +1,5 @@
 // Guard: reject prompts that NAME refs they didn't WIRE.
+// Modification notice: validate named video refs against resolved media types.
 //
 // @ImageN / @VideoN / @AudioN in a prompt are positional labels for the refs
 // passed via flags (--ref-source-id for image+video sources,
@@ -44,18 +45,14 @@ function maxMentionedOrdinals(prompt) {
 //   tier "image"  — generate_image[_pro]: only --ref-source-id image refs
 //     exist. @Image must be backed by a ref; @Video/@Audio are category errors
 //     (no flag on this tier could ever satisfy them).
-//   tier "video"  — generate_video: --ref-source-id carries image AND video
-//     refs (not yet split by node type at the pre-stage guard point), and
-//     --ref-audio-source-id carries audio. @Audio is checked exactly against
-//     the audio count. @Image and @Video are distinct slots both drawn from
-//     --ref-source-id, so the minimum source refs required is
-//     (max @Image) + (max @Video), checked against the COMBINED count. This is
-//     an approximation: it catches "named N, passed fewer" (the real bug) but
-//     a fine image-vs-video split can slip (e.g. @Video1 with only image refs
-//     and >=1 ref). Resolving per-kind here would mean hoisting an async
-//     workflow.json read into the pre-stage hot path + every replay, which the
-//     CLIs deliberately defer; not worth it for the rare fine case.
-export function checkPromptRefsWired({ prompt, refSourceCount = 0, audioRefCount = 0, tier }) {
+//   tier "video" — --ref-source-id carries image AND video refs, with separate
+//     ordinal sequences. generate_video resolves their types before staging
+//     and supplies imageRefCount/videoRefCount, so an image cannot stand in
+//     for a missing @VideoN (or vice versa). Callers without resolved counts
+//     retain the combined-count precheck. @Audio uses its dedicated flag count.
+export function checkPromptRefsWired({
+  prompt, refSourceCount = 0, imageRefCount, videoRefCount, audioRefCount = 0, tier,
+}) {
   const max = maxMentionedOrdinals(prompt);
 
   if (tier === "image") {
@@ -72,6 +69,15 @@ export function checkPromptRefsWired({ prompt, refSourceCount = 0, audioRefCount
   if (tier === "video") {
     if (max.Audio > audioRefCount) {
       return `prompt references @Audio${max.Audio} but only ${audioRefCount} audio ref(s) passed via --ref-audio-source-id. Pass the missing ref(s), or remove the mention.`;
+    }
+    if (imageRefCount !== undefined && videoRefCount !== undefined) {
+      if (max.Image > imageRefCount) {
+        return `prompt references @Image${max.Image} but only ${imageRefCount} image ref(s) passed via --ref-source-id. Video refs do not fill image slots. Pass the missing image ref(s), or fix the mention.`;
+      }
+      if (max.Video > videoRefCount) {
+        return `prompt references @Video${max.Video} but only ${videoRefCount} video ref(s) passed via --ref-source-id. Image refs do not fill video slots. Pass the missing video ref(s), or fix the mention.`;
+      }
+      return null;
     }
     const sourceNeeded = max.Image + max.Video;
     if (sourceNeeded > refSourceCount) {

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Modification notice: validate prompt references by media type before staging.
 // CLI wrapper for video generation via PAI raw passthrough
 // (model id: video-generation). Synchronous from the caller's POV —
 // typical wall-clock is 2-4 min, so plan accordingly.
@@ -231,10 +232,24 @@ if (audSrcIds.length > videoLimits.max_audio_refs) {
 }
 
 // Reject prompts that name @ImageN/@VideoN/@AudioN without wiring the matching
-// flag — runs before staging + any paid call. See _ref_guard.js.
+// media kind — runs before staging + any paid call, including draft replay.
+// Reference-video billing already reads workflow.json before the draft gate;
+// resolve types here too rather than letting a video fill a missing image slot.
+let imageRefCount = 0;
+let videoRefCount = 0;
+if (refSourcesArg.length) {
+  const projectId = args["project-id"] || (await readActiveProject().catch(() => null));
+  for (const sid of refSourcesArg) {
+    const type = await readNodeType({ nodeId: sid, projectId });
+    if (type === "image_result") imageRefCount++;
+    else if (type === "video_result") videoRefCount++;
+  }
+}
 const refGuardMsg = checkPromptRefsWired({
   prompt: args.prompt,
   refSourceCount: refSourcesArg.length,
+  imageRefCount,
+  videoRefCount,
   audioRefCount: audSrcIds.length,
   tier: "video",
 });
